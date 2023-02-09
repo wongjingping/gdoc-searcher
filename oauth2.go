@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -79,6 +80,7 @@ func getGdocList(srv *drive.Service, numDocuments int64) []*drive.File {
 		return []*drive.File{}
 	}
 	if fileList.Files != nil {
+		log.Printf("Obtained %d files", len(fileList.Files))
 		return fileList.Files
 	} else {
 		log.Println("No files returned from google drive")
@@ -86,18 +88,10 @@ func getGdocList(srv *drive.Service, numDocuments int64) []*drive.File {
 	}
 }
 
-// get document ids from file list
-func getDocumentId(files []*drive.File) []string {
-	result := make([]string, len(files))
-	for i, f := range files {
-		result[i] = f.Id
-	}
-	return result
-}
-
 // downloads google doc
 func downloadDoc(srv *docs.Service, docId string) *docs.Document {
 	doc, err := srv.Documents.Get(docId).Do()
+	// TODO implement retries
 	if err != nil {
 		log.Fatalf("Unable to retrieve data from document: %v", err)
 	}
@@ -105,6 +99,7 @@ func downloadDoc(srv *docs.Service, docId string) *docs.Document {
 	return doc
 }
 
+// extract text content from doc and write to disk as a text file
 func extractAndSaveDoc(doc *docs.Document, docId string) error {
 	r, _ := regexp.Compile("HEADING_")
 	os.MkdirAll("doc", os.ModePerm)
@@ -134,6 +129,7 @@ func extractAndSaveDoc(doc *docs.Document, docId string) error {
 					w.WriteString(p.TextRun.Content)
 				}
 			}
+			// TODO extract (un)ordered list elements
 			flushErr := w.Flush()
 			if flushErr != nil {
 				return flushErr
@@ -142,6 +138,16 @@ func extractAndSaveDoc(doc *docs.Document, docId string) error {
 	}
 	log.Printf("Finished processing doc %s %s...", doc.Title, docId[:10])
 	return nil
+}
+
+// download, extract and save document
+func downloadExtractSaveDoc(srv *docs.Service, docId string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	doc := downloadDoc(srv, docId)
+	err := extractAndSaveDoc(doc, docId)
+	if err != nil {
+		log.Printf("Could not extract and save doc %s %s\n%s", doc.Title, docId, err)
+	}
 }
 
 func main() {
@@ -170,15 +176,14 @@ func main() {
 		log.Fatalf("Unable to retrieve Docs client: %v", err)
 	}
 
-	fileList := getGdocList(driveService, 10)
-	docIds := getDocumentId(fileList)
+	docFiles := getGdocList(driveService, 10)
 
-	for _, docId := range docIds {
-		doc := downloadDoc(docsService, docId)
-		err = extractAndSaveDoc(doc, docId) // TODO update metadata in postgres
-		// TODO make the download, extract, save all async
-		if err != nil {
-			panic(err)
-		}
+	var wg sync.WaitGroup
+	wg.Add(len(docFiles))
+	for _, docFile := range docFiles {
+		go downloadExtractSaveDoc(docsService, docFile.Id, &wg)
+
+		// TODO update metadata in postgres
 	}
+	wg.Wait()
 }
