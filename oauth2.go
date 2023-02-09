@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -71,6 +74,53 @@ func splitBody(doc *docs.Document) []string {
 	return []string{}
 }
 
+// downloads google doc
+func downloadDoc(srv *docs.Service, docId string) *docs.Document {
+	doc, err := srv.Documents.Get(docId).Do()
+	if err != nil {
+		log.Fatalf("Unable to retrieve data from document: %v", err)
+	}
+	return doc
+}
+
+func extractAndSaveDoc(doc *docs.Document, docId string) error {
+	r, _ := regexp.Compile("HEADING_")
+	os.MkdirAll("doc", os.ModePerm)
+	fileName := fmt.Sprintf("doc/%s", docId)
+	f, osErr := os.Create(fileName)
+	if osErr != nil {
+		return osErr
+	}
+	w := bufio.NewWriter(f)
+	for _, b := range doc.Body.Content {
+		if b.Paragraph != nil && b.Paragraph.Elements != nil {
+			// get heading level and prepend '#'
+			if b.Paragraph.ParagraphStyle != nil {
+				idx := r.FindStringIndex(b.Paragraph.ParagraphStyle.NamedStyleType)
+				if idx != nil {
+					headingLevel, _ := strconv.Atoi(b.Paragraph.ParagraphStyle.NamedStyleType[idx[1]:])
+					for i := 0; i < headingLevel; i++ {
+						w.WriteString("#") // ignore number of bytes written
+					}
+					w.WriteString(" ")
+				}
+			}
+			// extract text
+			for _, p := range b.Paragraph.Elements {
+				if p.TextRun != nil {
+					w.WriteString(p.TextRun.Content)
+				}
+			}
+			flushErr := w.Flush()
+			if flushErr != nil {
+				return flushErr
+			}
+		}
+	}
+	fmt.Printf("Finished processing doc %s", docId)
+	return nil
+}
+
 func main() {
 	ctx := context.Background()
 	b, err := os.ReadFile("credentials.json")
@@ -90,24 +140,11 @@ func main() {
 		log.Fatalf("Unable to retrieve Docs client: %v", err)
 	}
 
-	// Prints the title of the requested doc:
 	docId := "1rJz6s712Y0s2dOAEZSz5sGkPgmFWWex5hB_W0WENKnM"
-	doc, err := srv.Documents.Get(docId).Do()
+	doc := downloadDoc(srv, docId)
+	err = extractAndSaveDoc(doc, docId)
+	// TODO update metadata in postgres
 	if err != nil {
-		log.Fatalf("Unable to retrieve data from document: %v", err)
-	}
-	fmt.Printf("The title of the doc is: %s\n", doc.Title)
-
-	// var chunks []string
-	// chunks = splitBody(doc)
-	for i, b := range doc.Body.Content {
-		if b.Paragraph != nil && b.Paragraph.Elements != nil {
-			for _, p := range b.Paragraph.Elements {
-				fmt.Println(p.TextRun.Content)
-			}
-		}
-		if i > 10 {
-			return
-		}
+		panic(err)
 	}
 }
