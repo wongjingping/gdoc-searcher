@@ -14,6 +14,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/docs/v1"
+	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
 
@@ -69,9 +70,29 @@ func saveToken(path string, token *oauth2.Token) {
 	json.NewEncoder(f).Encode(token)
 }
 
-// Splits a doc's body into chunks
-func splitBody(doc *docs.Document) []string {
-	return []string{}
+// get list of gdoc file information
+func getGdocList(srv *drive.Service, numDocuments int64) []*drive.File {
+	fileList, err := srv.Files.List().Corpora("user").OrderBy("createdTime desc").
+		PageSize(numDocuments).Q(`mimeType = 'application/vnd.google-apps.document'`).Do()
+	if err != nil {
+		log.Fatalf("Unable to retrieve file list from google drive.\n%s", err)
+		return []*drive.File{}
+	}
+	if fileList.Files != nil {
+		return fileList.Files
+	} else {
+		log.Println("No files returned from google drive")
+		return []*drive.File{}
+	}
+}
+
+// get document ids from file list
+func getDocumentId(files []*drive.File) []string {
+	result := make([]string, len(files))
+	for i, f := range files {
+		result[i] = f.Id
+	}
+	return result
 }
 
 // downloads google doc
@@ -80,6 +101,7 @@ func downloadDoc(srv *docs.Service, docId string) *docs.Document {
 	if err != nil {
 		log.Fatalf("Unable to retrieve data from document: %v", err)
 	}
+	log.Printf("Downloaded doc %s %s...", doc.Title, docId[:10])
 	return doc
 }
 
@@ -88,6 +110,7 @@ func extractAndSaveDoc(doc *docs.Document, docId string) error {
 	os.MkdirAll("doc", os.ModePerm)
 	fileName := fmt.Sprintf("doc/%s", docId)
 	f, osErr := os.Create(fileName)
+	defer f.Close()
 	if osErr != nil {
 		return osErr
 	}
@@ -117,11 +140,13 @@ func extractAndSaveDoc(doc *docs.Document, docId string) error {
 			}
 		}
 	}
-	fmt.Printf("Finished processing doc %s", docId)
+	log.Printf("Finished processing doc %s %s...", doc.Title, docId[:10])
 	return nil
 }
 
 func main() {
+
+	// authentication
 	ctx := context.Background()
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
@@ -129,22 +154,31 @@ func main() {
 	}
 
 	// If modifying these scopes, delete your previously saved token.json.
-	config, err := google.ConfigFromJSON(b, "https://www.googleapis.com/auth/documents.readonly")
+	config, err := google.ConfigFromJSON(b, docs.DocumentsReadonlyScope, drive.DriveReadonlyScope)
 	if err != nil {
 		log.Fatalf("Unable to parse client secret file to config: %v", err)
 	}
 	client := getClient(config)
 
-	srv, err := docs.NewService(ctx, option.WithHTTPClient(client))
+	// setup Google API clients (drive and gdocs)
+	driveService, err := drive.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		log.Fatalf("Unable to retrieve Drive client: %v", err)
+	}
+	docsService, err := docs.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Fatalf("Unable to retrieve Docs client: %v", err)
 	}
 
-	docId := "1rJz6s712Y0s2dOAEZSz5sGkPgmFWWex5hB_W0WENKnM"
-	doc := downloadDoc(srv, docId)
-	err = extractAndSaveDoc(doc, docId)
-	// TODO update metadata in postgres
-	if err != nil {
-		panic(err)
+	fileList := getGdocList(driveService, 10)
+	docIds := getDocumentId(fileList)
+
+	for _, docId := range docIds {
+		doc := downloadDoc(docsService, docId)
+		err = extractAndSaveDoc(doc, docId) // TODO update metadata in postgres
+		// TODO make the download, extract, save all async
+		if err != nil {
+			panic(err)
+		}
 	}
 }
